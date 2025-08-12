@@ -135,4 +135,8 @@ private class ShizukuContext(context: Context) : ContextWrapper(context) {
         }
         return builder.build()
     }
+
+    override fun getOpPackageName(): String {
+        return "com.android.shell"
+    }
 }
