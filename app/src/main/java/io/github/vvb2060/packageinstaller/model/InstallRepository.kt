@@ -299,6 +299,24 @@ class InstallRepository(private val context: Application) {
                     return InstallAborted(ABORT_SPLIT)
                 }
             }
+        } else if (apk.isSplit() && usingRootFallback) {
+            // For root installation with split APKs, we'll attempt full installation
+            // This may not work perfectly for all split APK scenarios
+            Log.w(TAG, "Split APK detected with root fallback - attempting full installation")
+            full = true
+        }
+                    apk.label = info.appLabel as String?
+                    apk.icon = info.appIcon?.toDrawable(context.resources)
+                    break
+                }
+            }
+            if (stagedSessionId == SessionInfo.INVALID_ID) {
+                if (old != null && old.longVersionCode == apk.versionCode) {
+                    full = false
+                } else {
+                    return InstallAborted(ABORT_SPLIT)
+                }
+            }
         }
         if (old != null) {
             if (apk.label == null) {

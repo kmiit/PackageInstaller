@@ -117,9 +117,15 @@ object RootInstaller {
             
             // Parse result - pm install typically returns "Success" on success
             val result = output.toString().trim()
-            val success = result.contains("Success") && exitCode == 0
+            val errorResult = errors.toString().trim()
             
-            Log.i(TAG, "Root installation result: success=$success")
+            // Check for success indicators
+            val success = (result.contains("Success") || result.contains("success")) && 
+                         exitCode == 0 && 
+                         !errorResult.contains("Error") && 
+                         !errorResult.contains("INSTALL_FAILED")
+            
+            Log.i(TAG, "Root installation result: success=$success, output='$result', errors='$errorResult'")
             success
             
         } catch (e: Exception) {
