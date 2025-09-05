@@ -77,6 +77,9 @@ public class InstallErrorFragment extends BaseDialogFragment {
                     context.getString(R.string.license)) + "\n\n" +
                     context.getString(R.string.copyright);
             }
+            case InstallAborted.ABORT_ROOT -> {
+                return context.getString(R.string.error_root_unavailable);
+            }
         }
         var id = switch (code) {
             case InstallAborted.ABORT_PARSE -> R.string.error_parse;
@@ -84,6 +87,7 @@ public class InstallErrorFragment extends BaseDialogFragment {
             case InstallAborted.ABORT_NOTFOUND -> R.string.error_notfound;
             case InstallAborted.ABORT_CREATE -> R.string.error_create;
             case InstallAborted.ABORT_WRITE -> R.string.error_write;
+            case InstallAborted.ABORT_ROOT -> R.string.error_root_unavailable;
             default -> R.string.error_title;
         };
         return context.getString(id);

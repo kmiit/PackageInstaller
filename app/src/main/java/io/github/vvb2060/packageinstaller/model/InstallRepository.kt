@@ -38,6 +38,7 @@ import io.github.vvb2060.packageinstaller.model.InstallAborted.Companion.ABORT_P
 import io.github.vvb2060.packageinstaller.model.InstallAborted.Companion.ABORT_SHIZUKU
 import io.github.vvb2060.packageinstaller.model.InstallAborted.Companion.ABORT_SPLIT
 import io.github.vvb2060.packageinstaller.model.InstallAborted.Companion.ABORT_WRITE
+import io.github.vvb2060.packageinstaller.model.InstallAborted.Companion.ABORT_ROOT
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuProvider
 import java.io.File
@@ -53,33 +54,67 @@ class InstallRepository(private val context: Application) {
     private var callingUid = Process.INVALID_UID
     private lateinit var intent: Intent
     private var apkLite: ApkLite? = null
+    private var usingRootFallback = false
 
     fun preCheck(intent: Intent): Boolean {
-        if (!Shizuku.pingBinder()
-            || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED
-            || Shizuku.checkRemotePermission(Manifest.permission.INSTALL_PACKAGES)
-            != PackageManager.PERMISSION_GRANTED
+        // First try Shizuku (existing behavior)
+        if (Shizuku.pingBinder()
+            && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            && Shizuku.checkRemotePermission(Manifest.permission.INSTALL_PACKAGES) == PackageManager.PERMISSION_GRANTED
         ) {
-            installResult.value = InstallAborted(
-                ABORT_SHIZUKU,
+            Log.d(TAG, "Using Shizuku for installation")
+            usingRootFallback = false
+            this.intent = intent
+            Log.v(TAG, "Intent: $intent")
+
+            Hook.init(context)
+            packageManager = Hook.pm
+            packageInstaller = Hook.installer
+            Hook.disableAdbVerify(context)
+            PreferredActivity.set(context.packageManager)
+
+            installResult.value = InstallParse()
+            return true
+        }
+        
+        // If Shizuku is not available, try root as fallback
+        if (RootInstaller.isRootAvailable() && RootInstaller.hasInstallPermission()) {
+            Log.d(TAG, "Using root fallback for installation")
+            usingRootFallback = true
+            this.intent = intent
+            Log.v(TAG, "Intent: $intent")
+            
+            // Use system package manager for parsing but root for installation
+            packageManager = context.packageManager
+            packageInstaller = packageManager.packageInstaller
+            
+            installResult.value = InstallParse()
+            return true
+        }
+
+        // Both Shizuku and root failed
+        Log.w(TAG, "Neither Shizuku nor root available for installation")
+        val errorCode = if (!Shizuku.pingBinder() || 
+            Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED ||
+            Shizuku.checkRemotePermission(Manifest.permission.INSTALL_PACKAGES) != PackageManager.PERMISSION_GRANTED) {
+            // Prioritize Shizuku error if it's the main issue
+            ABORT_SHIZUKU
+        } else {
+            // Otherwise show root error
+            ABORT_ROOT
+        }
+        
+        installResult.value = InstallAborted(
+            errorCode,
+            if (errorCode == ABORT_SHIZUKU) {
                 context.packageManager.getLaunchIntentForPackage(
                     ShizukuProvider.MANAGER_APPLICATION_ID
                 )
-            )
-            return false
-        }
-
-        this.intent = intent
-        Log.v(TAG, "Intent: $intent")
-
-        Hook.init(context)
-        packageManager = Hook.pm
-        packageInstaller = Hook.installer
-        Hook.disableAdbVerify(context)
-        PreferredActivity.set(context.packageManager)
-
-        installResult.value = InstallParse()
-        return true
+            } else {
+                null
+            }
+        )
+        return false
     }
 
     fun parseUri() {
@@ -115,6 +150,13 @@ class InstallRepository(private val context: Application) {
     fun install(setInstaller: Boolean, commit: Boolean, full: Boolean, removeSplit: Boolean) {
         val uri = intent.data
         installResult.postValue(InstallInstalling(apkLite!!))
+        
+        if (usingRootFallback) {
+            // Use root installation method
+            installWithRoot(uri)
+            return
+        }
+        
         if (ContentResolver.SCHEME_CONTENT != uri?.scheme &&
             ContentResolver.SCHEME_FILE != uri?.scheme
         ) {
@@ -166,6 +208,38 @@ class InstallRepository(private val context: Application) {
         }
     }
 
+    private fun installWithRoot(uri: Uri?) {
+        if (uri == null) {
+            installResult.postValue(InstallAborted(ABORT_ROOT))
+            return
+        }
+        
+        stagingProgress.postValue(50)
+        
+        // Use RootInstaller to install the APK
+        val success = RootInstaller.installApk(context, uri)
+        
+        stagingProgress.postValue(101)
+        
+        if (success) {
+            // Installation succeeded
+            val intent = packageManager.getLaunchIntentForPackage(apkLite!!.packageName)
+            // Refresh APK info
+            try {
+                packageManager.getPackageInfo(apkLite!!.packageName, 0)?.let { info ->
+                    apkLite!!.icon = info.applicationInfo!!.loadIcon(packageManager)
+                    apkLite!!.label = info.applicationInfo!!.loadLabel(packageManager).toString()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to refresh package info after installation", e)
+            }
+            installResult.postValue(InstallSuccess(apkLite!!, intent))
+        } else {
+            // Installation failed
+            installResult.postValue(InstallAborted(ABORT_ROOT))
+        }
+    }
+
     private fun processContentUri(uri: Uri): InstallStage {
         Log.v(TAG, "content URI: $uri")
         packageManager.resolveContentProvider(uri.authority!!, 0)?.also { info ->
@@ -183,12 +257,19 @@ class InstallRepository(private val context: Application) {
             return InstallAborted(ABORT_PARSE)
         }
         val old = try {
-            packageManager.getPackageInfo(apk.packageName, PackageManager_rename.MATCH_KNOWN_PACKAGES)
+            if (usingRootFallback) {
+                // Use regular PackageManager when using root fallback
+                packageManager.getPackageInfo(apk.packageName, PackageManager.GET_META_DATA)
+            } else {
+                packageManager.getPackageInfo(apk.packageName, PackageManager_rename.MATCH_KNOWN_PACKAGES)
+            }
         } catch (_: PackageManager.NameNotFoundException) {
             null
         }
         var full = true
-        if (apk.isSplit()) {
+        if (apk.isSplit() && !usingRootFallback) {
+            // Split APK handling is only available with Shizuku currently
+            // For root installation, we'll handle splits differently or require full installs
             for (item in packageInstaller.allSessions) {
                 if (item.isActive && item.appPackageName == apk.packageName) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
