@@ -13,8 +13,8 @@ import org.objectweb.asm.commons.ClassRemapper
 import org.objectweb.asm.commons.Remapper
 
 plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
+    id("com.android.application") version "7.4.2"
+    id("org.jetbrains.kotlin.android") version "1.8.10"
 }
 
 android {
