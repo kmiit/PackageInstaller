@@ -130,10 +130,33 @@ object PackageUtil {
     }
 
     private fun getAppLiteFromApkFd(fd: FileDescriptor, name: String, length: Long): ApkLite? {
-        val assets = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            ApkAssets.loadFromFd(fd, name, 0, length, 0, null)
-        } else {
-            ApkAssets.loadFromFd(fd, name, false, false)
+        // 某些定制/旧系统虽然 Build.VERSION >= R 但未提供新签名 (fd, name, offset, length, flags, provider)
+        // 使用反射优先尝试新签名，失败则回退到旧签名 (fd, name, overlays, sharedLibs)
+        val assets = try {
+            val newMethod = ApkAssets::class.java.getMethod(
+                "loadFromFd",
+                FileDescriptor::class.java,
+                String::class.java,
+                Long::class.javaPrimitiveType,
+                Long::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                Class.forName("android.content.res.loader.AssetsProvider")
+            )
+            newMethod.invoke(null, fd, name, 0L, length, 0, null) as ApkAssets
+        } catch (_: Throwable) {
+            // 旧签名：loadFromFd(fd, name, overlay, sharedLibs)
+            try {
+                val oldMethod = ApkAssets::class.java.getMethod(
+                    "loadFromFd",
+                    FileDescriptor::class.java,
+                    String::class.java,
+                    Boolean::class.javaPrimitiveType,
+                    Boolean::class.javaPrimitiveType,
+                )
+                oldMethod.invoke(null, fd, name, false, false) as ApkAssets
+            } catch (e2: Throwable) {
+                throw IOException("Failed to load ApkAssets: ${e2.message}")
+            }
         }
         val am = `AssetManager$Builder`()
             .addApkAssets(assets)
