@@ -42,6 +42,9 @@ import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuProvider
 import java.io.File
 import java.io.IOException
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.util.concurrent.TimeUnit
 
 class InstallRepository(private val context: Application) {
     private val TAG = InstallRepository::class.java.simpleName
@@ -53,30 +56,53 @@ class InstallRepository(private val context: Application) {
     private var callingUid = Process.INVALID_UID
     private lateinit var intent: Intent
     private var apkLite: ApkLite? = null
+    private var rootMode: Boolean = false
+
+    private fun canUseRoot(): Boolean {
+        return try {
+            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
+            val out = BufferedReader(InputStreamReader(proc.inputStream)).use { it.readText() }
+            val err = BufferedReader(InputStreamReader(proc.errorStream)).use { it.readText() }
+            proc.waitFor(2, TimeUnit.SECONDS)
+            proc.exitValue() == 0 && (out.contains("uid=0") || err.contains("uid=0"))
+        } catch (_: Exception) {
+            false
+        }
+    }
 
     fun preCheck(intent: Intent): Boolean {
         if (!Shizuku.pingBinder()
             || Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED
-            || Shizuku.checkRemotePermission(Manifest.permission.INSTALL_PACKAGES)
-            != PackageManager.PERMISSION_GRANTED
+            || Shizuku.checkRemotePermission(Manifest.permission.INSTALL_PACKAGES) != PackageManager.PERMISSION_GRANTED
         ) {
-            installResult.value = InstallAborted(
-                ABORT_SHIZUKU,
-                context.packageManager.getLaunchIntentForPackage(
-                    ShizukuProvider.MANAGER_APPLICATION_ID
+            // 尝试 root 回退
+            if (canUseRoot()) {
+                rootMode = true
+            } else {
+                installResult.value = InstallAborted(
+                    ABORT_SHIZUKU,
+                    context.packageManager.getLaunchIntentForPackage(
+                        ShizukuProvider.MANAGER_APPLICATION_ID
+                    )
                 )
-            )
-            return false
+                return false
+            }
         }
 
         this.intent = intent
         Log.v(TAG, "Intent: $intent")
 
-        Hook.init(context)
-        packageManager = Hook.pm
-        packageInstaller = Hook.installer
-        Hook.disableAdbVerify(context)
-        PreferredActivity.set(context.packageManager)
+        if (!rootMode) {
+            Hook.init(context)
+            packageManager = Hook.pm
+            packageInstaller = Hook.installer
+            Hook.disableAdbVerify(context)
+            PreferredActivity.set(context.packageManager)
+        } else {
+            // root 模式下直接使用自身 pm，不进行 Hook
+            packageManager = context.packageManager
+            packageInstaller = packageManager.packageInstaller
+        }
 
         installResult.value = InstallParse()
         return true
@@ -115,6 +141,10 @@ class InstallRepository(private val context: Application) {
     fun install(setInstaller: Boolean, commit: Boolean, full: Boolean, removeSplit: Boolean) {
         val uri = intent.data
         installResult.postValue(InstallInstalling(apkLite!!))
+        if (rootMode) {
+            rootInstall(uri, setInstaller, full, removeSplit)
+            return
+        }
         if (ContentResolver.SCHEME_CONTENT != uri?.scheme &&
             ContentResolver.SCHEME_FILE != uri?.scheme
         ) {
@@ -163,6 +193,150 @@ class InstallRepository(private val context: Application) {
             commit()
         } else {
             installResult.postValue(InstallAborted(ABORT_CLOSE))
+        }
+    }
+
+    private fun rootInstall(uri: Uri?, setInstaller: Boolean, full: Boolean, removeSplit: Boolean) {
+        // root 模式：使用 pm shell 命令完成安装
+        // 支持：单 APK、拆分补充、新增或移除 split（通过重新安装）以及 zip (简单解压后采用 install-multiple)
+        try {
+            val files = mutableListOf<File>()
+            val apk = apkLite!!
+            val cacheDir = File(context.cacheDir, "root_install").apply { mkdirs() }
+
+            fun copyUriToFile(u: Uri): File? {
+                return try {
+                    val name = "apk_${System.currentTimeMillis()}" + if (apk.zip) ".zip" else ".apk"
+                    val dst = File(cacheDir, name)
+                    context.contentResolver.openInputStream(u)?.use { input ->
+                        dst.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    } ?: return null
+                    dst
+                } catch (_: Exception) { null }
+            }
+
+            var source: File? = null
+            if (uri != null) {
+                source = when (uri.scheme) {
+                    ContentResolver.SCHEME_FILE -> File(uri.path!!)
+                    ContentResolver.SCHEME_CONTENT -> copyUriToFile(uri)
+                    else -> null
+                }
+            }
+
+            if (source == null || !source.exists()) {
+                setStageBasedOnResult(
+                    PackageInstaller.STATUS_FAILURE,
+                    PackageManager_rename.INSTALL_FAILED_INVALID_APK,
+                    "Source APK not found"
+                )
+                return
+            }
+
+            if (removeSplit) {
+                // 通过重新安装不包含该 split 的其余 split 来实现移除
+                try {
+                    val oldInfo = packageManager.getPackageInfo(apk.packageName, 0)
+                    val base = oldInfo.applicationInfo!!.sourceDir
+                    val splits = oldInfo.applicationInfo!!.splitSourceDirs ?: emptyArray()
+                    files.add(File(base))
+                    splits.filterNot { it.contains("${apk.splitName}") }.forEach { files.add(File(it)) }
+                } catch (e: Exception) {
+                    setStageBasedOnResult(
+                        PackageInstaller.STATUS_FAILURE,
+                        PackageManager_rename.INSTALL_FAILED_INVALID_APK,
+                        "Failed to prepare split removal: ${e.localizedMessage}"
+                    )
+                    return
+                }
+            } else if (apk.splitName != null && !apk.zip) {
+                // 新增或替换单独 split: 需要包含 base + 其它 splits + 新 split
+                try {
+                    val oldInfo = packageManager.getPackageInfo(apk.packageName, 0)
+                    val base = oldInfo.applicationInfo!!.sourceDir
+                    val splits = oldInfo.applicationInfo!!.splitSourceDirs ?: emptyArray()
+                    files.add(File(base))
+                    // 其它 splits
+                    splits.filterNot { path -> path.substringAfterLast('/') == source.name }.forEach { files.add(File(it)) }
+                    files.add(source)
+                } catch (_: Exception) {
+                    // 如果旧信息获取失败，则退化为单 APK 安装
+                    files.add(source)
+                }
+            } else if (apk.zip) {
+                // 解压 zip 中的 apk 文件后用 install-multiple
+                try {
+                    context.contentResolver.openAssetFileDescriptor(uri!!, "r")?.use { afd ->
+                        // 简化：直接逐条写出所有 .apk
+                        org.apache.commons.compress.archivers.zip.ZipFile.builder()
+                            .setIgnoreLocalFileHeader(true)
+                            .setSeekableByteChannel(afd.createInputStream().channel)
+                            .get().use { zf ->
+                                val entries = zf.entries.asSequence().filter { it.name.endsWith(".apk") }.toList()
+                                if (entries.isEmpty()) throw IOException("No apks in zip")
+                                entries.forEach { entry ->
+                                    val outFile = File(cacheDir, entry.name.substringAfterLast('/'))
+                                    zf.getInputStream(entry).use { ins ->
+                                        outFile.outputStream().use { outs -> ins.copyTo(outs) }
+                                    }
+                                    files.add(outFile)
+                                }
+                            }
+                    }
+                } catch (e: Exception) {
+                    setStageBasedOnResult(
+                        PackageInstaller.STATUS_FAILURE,
+                        PackageManager_rename.INSTALL_FAILED_INVALID_APK,
+                        "Zip extract failed: ${e.localizedMessage}"
+                    )
+                    return
+                }
+            } else {
+                files.add(source)
+            }
+
+            val multiple = files.size > 1
+            // 构建 pm 命令
+            val cmd = buildString {
+                append("pm ")
+                append(if (multiple) "install-multiple" else "install")
+                append(" -r -d") // 允许替换和降级
+                if (setInstaller) {
+                    // 尝试指定 installer (可能无效)
+                    append(" --installer com.android.vending")
+                }
+                files.forEach { f -> append(' ') ; append(f.absolutePath) }
+            }
+            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+            val stdout = BufferedReader(InputStreamReader(proc.inputStream)).readText()
+            val stderr = BufferedReader(InputStreamReader(proc.errorStream)).readText()
+            proc.waitFor()
+            // 清理缓存文件
+            try { cacheDir.listFiles()?.forEach { it.delete() } } catch (_: Exception) {}
+            if (proc.exitValue() == 0 && (stderr.isBlank())) {
+                // 等待系统刷新（短暂）
+                try { Thread.sleep(300) } catch (_: InterruptedException) {}
+                setStageBasedOnResult(
+                    PackageInstaller.STATUS_SUCCESS,
+                    PackageManager_rename.INSTALL_SUCCEEDED,
+                    null
+                )
+            } else {
+                val msg = listOf(stdout, stderr).filter { it.isNotBlank() }.joinToString("\n")
+                setStageBasedOnResult(
+                    PackageInstaller.STATUS_FAILURE,
+                    PackageManager_rename.INSTALL_FAILED_INTERNAL_ERROR,
+                    msg.ifBlank { "pm command failed" }
+                )
+            }
+        } catch (e: Exception) {
+            setStageBasedOnResult(
+                PackageInstaller.STATUS_FAILURE,
+                PackageManager_rename.INSTALL_FAILED_INTERNAL_ERROR,
+                e.localizedMessage
+            )
         }
     }
 
