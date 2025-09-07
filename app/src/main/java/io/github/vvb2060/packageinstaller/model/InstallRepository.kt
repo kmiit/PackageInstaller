@@ -310,7 +310,7 @@ class InstallRepository(private val context: Application) {
             val cmd = buildString {
                 append("pm ")
                 append(if (multiple) "install-multiple" else "install")
-                append(" -r -d") // 允许替换和降级
+                append(" -r -d -t") // 允许替换、降级，并允许 test-only
                 if (setInstaller) {
                     // 尝试指定 installer (可能无效)
                     append(" --installer com.android.vending")
