@@ -568,14 +568,33 @@ class InstallRepository(private val context: Application) {
     private fun setStageBasedOnResult(statusCode: Int, legacyStatus: Int, message: String?) {
         if (statusCode == PackageInstaller.STATUS_SUCCESS) {
             val intent = packageManager.getLaunchIntentForPackage(apkLite!!.packageName)
-            packageManager.getPackageInfo(apkLite!!.packageName, 0)?.let { info ->
-                apkLite!!.icon = info.applicationInfo!!.loadIcon(packageManager)
-                apkLite!!.label = info.applicationInfo!!.loadLabel(packageManager).toString()
+            // 新安装后部分老系统/低性能设备上 PMS 尚未完成索引，增加轮询重试
+            fetchPackageInfoWithRetry(apkLite!!.packageName)?.let { info ->
+                try {
+                    apkLite!!.icon = info.applicationInfo!!.loadIcon(packageManager)
+                } catch (_: Exception) {}
+                try {
+                    apkLite!!.label = info.applicationInfo!!.loadLabel(packageManager).toString()
+                } catch (_: Exception) {}
             }
             installResult.postValue(InstallSuccess(apkLite!!, intent))
         } else {
             installResult.postValue(InstallFailed(apkLite!!, legacyStatus, statusCode, message))
         }
+    }
+
+    private fun fetchPackageInfoWithRetry(pkg: String, attempts: Int = 20, intervalMs: Long = 150): PackageInfo? {
+        repeat(attempts) { idx ->
+            try {
+                return packageManager.getPackageInfo(pkg, 0)
+            } catch (_: PackageManager.NameNotFoundException) {
+                try { Thread.sleep(intervalMs) } catch (_: InterruptedException) {}
+            } catch (t: Throwable) { // 其它异常直接跳出
+                Log.w(TAG, "getPackageInfo retry aborted: ${t.message}")
+                return null
+            }
+        }
+        return null
     }
 
     fun cleanupInstall() {
