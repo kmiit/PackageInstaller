@@ -57,6 +57,14 @@ class InstallRepository(private val context: Application) {
     private lateinit var intent: Intent
     private var apkLite: ApkLite? = null
     private var rootMode: Boolean = false
+    // 兼容旧系统：动态获取 MATCH_KNOWN_PACKAGES，缺失则为 0
+    private val matchKnownPackages: Int by lazy {
+        try {
+            // 运行期已被 remap 回真实 PackageManager 类
+            val cls = Class.forName("android.content.pm.PackageManager")
+            cls.getField("MATCH_KNOWN_PACKAGES").getInt(null)
+        } catch (_: Throwable) { 0 }
+    }
 
     private fun canUseRoot(): Boolean {
         return try {
@@ -357,10 +365,8 @@ class InstallRepository(private val context: Application) {
             return InstallAborted(ABORT_PARSE)
         }
         val old = try {
-            packageManager.getPackageInfo(apk.packageName, PackageManager_rename.MATCH_KNOWN_PACKAGES)
-        } catch (_: PackageManager.NameNotFoundException) {
-            null
-        }
+            packageManager.getPackageInfo(apk.packageName, matchKnownPackages)
+        } catch (_: PackageManager.NameNotFoundException) { null }
         var full = true
         if (apk.isSplit()) {
             for (item in packageInstaller.allSessions) {
@@ -420,7 +426,7 @@ class InstallRepository(private val context: Application) {
 
     private fun processPackageUri(packageName: String): InstallStage {
         val info = try {
-            packageManager.getPackageInfo(packageName, PackageManager_rename.MATCH_KNOWN_PACKAGES)
+            packageManager.getPackageInfo(packageName, matchKnownPackages)
         } catch (e: PackageManager.NameNotFoundException) {
             Log.e(TAG, "Requested package not available.", e)
             return InstallAborted(ABORT_NOTFOUND)
