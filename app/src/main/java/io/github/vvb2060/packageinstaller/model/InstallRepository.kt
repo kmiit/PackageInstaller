@@ -229,7 +229,7 @@ class InstallRepository(private val context: Application) {
             if (source == null || !source.exists()) {
                 setStageBasedOnResult(
                     PackageInstaller.STATUS_FAILURE,
-                    PackageManager_rename.INSTALL_FAILED_INVALID_APK,
+                    PackageManager_rename.INSTALL_FAILED_INTERNAL_ERROR,
                     "Source APK not found"
                 )
                 return
@@ -246,7 +246,7 @@ class InstallRepository(private val context: Application) {
                 } catch (e: Exception) {
                     setStageBasedOnResult(
                         PackageInstaller.STATUS_FAILURE,
-                        PackageManager_rename.INSTALL_FAILED_INVALID_APK,
+                        PackageManager_rename.INSTALL_FAILED_INTERNAL_ERROR,
                         "Failed to prepare split removal: ${e.localizedMessage}"
                     )
                     return
@@ -288,7 +288,7 @@ class InstallRepository(private val context: Application) {
                 } catch (e: Exception) {
                     setStageBasedOnResult(
                         PackageInstaller.STATUS_FAILURE,
-                        PackageManager_rename.INSTALL_FAILED_INVALID_APK,
+                        PackageManager_rename.INSTALL_FAILED_INTERNAL_ERROR,
                         "Zip extract failed: ${e.localizedMessage}"
                     )
                     return
