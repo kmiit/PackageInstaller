@@ -323,8 +323,9 @@ class InstallRepository(private val context: Application) {
             proc.waitFor()
             // 清理缓存文件
             try { cacheDir.listFiles()?.forEach { it.delete() } } catch (_: Exception) {}
-            if (proc.exitValue() == 0 && (stderr.isBlank())) {
-                // 等待系统刷新（短暂）
+            val combined = (stdout + "\n" + stderr).lines().map { it.trim() }
+            val success = combined.any { it.equals("Success", true) }
+            if (success) {
                 try { Thread.sleep(300) } catch (_: InterruptedException) {}
                 setStageBasedOnResult(
                     PackageInstaller.STATUS_SUCCESS,
@@ -332,11 +333,13 @@ class InstallRepository(private val context: Application) {
                     null
                 )
             } else {
-                val msg = listOf(stdout, stderr).filter { it.isNotBlank() }.joinToString("\n")
+                // 提取 Failure [REASON] 或首行错误信息
+                val failureLine = combined.firstOrNull { it.startsWith("Failure") || it.startsWith("Error", true) }
+                val msg = failureLine ?: combined.filter { it.isNotBlank() }.joinToString("\n").takeIf { it.isNotBlank() }
                 setStageBasedOnResult(
                     PackageInstaller.STATUS_FAILURE,
                     PackageManager_rename.INSTALL_FAILED_INTERNAL_ERROR,
-                    msg.ifBlank { "pm command failed" }
+                    msg ?: "pm command failed"
                 )
             }
         } catch (e: Exception) {
