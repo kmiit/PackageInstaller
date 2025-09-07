@@ -327,6 +327,10 @@ class InstallRepository(private val context: Application) {
             val success = combined.any { it.equals("Success", true) }
             if (success) {
                 try { Thread.sleep(300) } catch (_: InterruptedException) {}
+                // 若图标缺失，尝试从源文件抽取
+                if (apkLite!!.icon == null) {
+                    extractIconFromSource(files)
+                }
                 setStageBasedOnResult(
                     PackageInstaller.STATUS_SUCCESS,
                     PackageManager_rename.INSTALL_SUCCEEDED,
@@ -348,6 +352,30 @@ class InstallRepository(private val context: Application) {
                 PackageManager_rename.INSTALL_FAILED_INTERNAL_ERROR,
                 e.localizedMessage
             )
+        }
+    }
+    private fun extractIconFromSource(files: List<File>) {
+        try {
+            // 选出 base APK：优先包含 base / master 的文件，否则取最早文件
+            val base = files.firstOrNull { f ->
+                val n = f.name.lowercase()
+                n.contains("base") || n.contains("master")
+            } ?: files.firstOrNull() ?: return
+            val pm = context.packageManager
+            val pkgInfo = pm.getPackageArchiveInfo(base.absolutePath, 0)
+            if (pkgInfo != null) {
+                val appInfo = pkgInfo.applicationInfo
+                appInfo.sourceDir = base.absolutePath
+                appInfo.publicSourceDir = base.absolutePath
+                if (apkLite!!.icon == null) {
+                    try { apkLite!!.icon = appInfo.loadIcon(pm) } catch (_: Exception) {}
+                }
+                if (apkLite!!.label.isNullOrBlank()) {
+                    try { apkLite!!.label = appInfo.loadLabel(pm)?.toString() } catch (_: Exception) {}
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "extractIconFromSource failed: ${t.message}")
         }
     }
 
